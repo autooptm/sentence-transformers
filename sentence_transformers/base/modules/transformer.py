@@ -56,6 +56,7 @@ from sentence_transformers.base.modality_types import (
     SingleInput,
 )
 from sentence_transformers.base.modules.input_module import InputModule
+from sentence_transformers.util import ao_opt as _ao_opt_21
 from sentence_transformers.util.decorators import transformer_kwargs_decorator
 from sentence_transformers.util.environment import suggest_extra_on_exception
 
@@ -1256,6 +1257,24 @@ class Transformer(InputModule):
         if not inputs:
             return {}
 
+        _ao_plain = (
+            _ao_opt_21.flag("ST_OPT_1")
+            and prompt is None
+            and processing_kwargs is None
+            and not kwargs
+            and type(inputs[0]) is str
+            and all(type(x) is str for x in inputs)
+        )
+        if _ao_plain:
+            _ao_plan = getattr(self, "_ao_text_plan", None)
+            if _ao_plan is not None:
+                with suggest_extra_on_exception():
+                    processor_output = self._call_processor(
+                        "text", {"text": list(inputs)}, _ao_plan[0], _ao_plan[1]
+                    )
+                processor_output["modality"] = "text"
+                return processor_output
+
         common_kwargs = {"return_tensors": "pt"}
         modality_kwargs = {
             "text": {"padding": True, "truncation": "longest_first"},
@@ -1401,6 +1420,20 @@ class Transformer(InputModule):
         num_videos_per_sample = None
         if self.track_media_counts and modality == "message":
             num_images_per_sample, num_videos_per_sample = _count_media_per_sample(processor_inputs["message"])
+
+        if (
+            _ao_plain
+            and getattr(self, "_ao_text_plan", None) is None
+            and modality == "text"
+            and not should_flatten
+            and prompt_length is None
+            and expansion is None
+            and not chat_template_kwargs
+            and not self.track_media_counts
+            and self.transformer_task not in ("text-generation", "any-to-any")
+            and processor_inputs == {"text": list(inputs)}
+        ):
+            self._ao_text_plan = (modality_kwargs, common_kwargs)
 
         with suggest_extra_on_exception():
             processor_output = self._call_processor(

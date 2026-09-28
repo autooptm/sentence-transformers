@@ -7,7 +7,7 @@ import math
 import warnings
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from multiprocessing import Queue
 from typing import Any, ClassVar, Literal, overload
 
@@ -23,6 +23,7 @@ from sentence_transformers.base.model import BaseModel
 from sentence_transformers.base.modules import Transformer
 from sentence_transformers.sentence_transformer.modules import Pooling
 from sentence_transformers.util import _move_tensors_to_cpu, batch_to_device, truncate_embeddings
+from sentence_transformers.util import ao_opt as _ao
 from sentence_transformers.util.decorators import deprecated_kwargs
 from sentence_transformers.util.quantization import quantize_embeddings
 from sentence_transformers.util.similarity import SimilarityFunction
@@ -919,17 +920,46 @@ class SentenceTransformer(BaseModel, FitMixin):
         self.to(device)
         self.eval()
 
+        _ao.apply_backend_flags()
+        _ao.opt_16(self)
+        _ao_opt_9 = _ao.opt_13()
+        _ao_opt_10 = (
+            torch.autocast(device_type=torch.device(device).type,
+                           dtype=torch.bfloat16 if _ao_opt_9 == "bf16" else torch.float16)
+            if _ao_opt_9
+            else nullcontext()
+        )
+
+        batch_size = _ao.resolved_batch_size(batch_size)
+
         truncate_dim = truncate_dim if truncate_dim is not None else self.truncate_dim
         all_embeddings = []
-        length_sorted_idx = np.argsort([-self._input_length(sen) for sen in inputs])
+        if _ao.flag("ST_OPT_2") and inputs and all(type(s) is str for s in inputs):
+            lengths = np.fromiter((len(s) for s in inputs), dtype=np.int64, count=len(inputs))
+            length_sorted_idx = np.argsort(-lengths)
+        else:
+            length_sorted_idx = np.argsort([-self._input_length(sen) for sen in inputs])
         if self._can_flatten_inputs():
             length_sorted_idx = self._interleave_sorted_indices(length_sorted_idx)
-        inputs_sorted = [inputs[idx] for idx in length_sorted_idx]
+        inputs_sorted = [inputs[idx] for idx in length_sorted_idx.tolist()]
 
         is_hpu = self.device.type == "hpu"
+        _ao_batched = (
+            _ao.flag("ST_OPT_3")
+            and output_value == "sentence_embedding"
+            and not is_hpu
+            and truncate_dim is None
+        )
+        _ao_opt_11 = _ao_batched and convert_to_numpy and _ao.flag("ST_OPT_4")
+        _ao_opt_12 = None
+        if _ao.opt_14() and not is_hpu:
+            _ao_opt_12 = _ao.opt_15(
+                lambda batch: self.preprocess(batch, prompt=prompt, **kwargs),
+                inputs_sorted, batch_size, _ao.opt_14())
         for start_index in trange(0, len(inputs_sorted), batch_size, desc="Batches", disable=not show_progress_bar):
             inputs_batch = inputs_sorted[start_index : start_index + batch_size]
-            features = self.preprocess(inputs_batch, prompt=prompt, **kwargs)
+            features = next(_ao_opt_12) if _ao_opt_12 is not None \
+                else self.preprocess(inputs_batch, prompt=prompt, **kwargs)
 
             if is_hpu:
                 features = self._pad_features_for_hpu(features)
@@ -937,7 +967,8 @@ class SentenceTransformer(BaseModel, FitMixin):
             features = batch_to_device(features, device)
 
             # Route through __call__ so that model.compile() applies to the forward pass.
-            out_features = self(features, **kwargs)
+            with _ao_opt_10:
+                out_features = self(features, **kwargs)
             if is_hpu:
                 out_features = copy.deepcopy(out_features)
 
@@ -968,19 +999,48 @@ class SentenceTransformer(BaseModel, FitMixin):
                 if normalize_embeddings:
                     embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
                 if convert_to_numpy:
-                    embeddings = embeddings.cpu()
+                    if _ao_opt_11:
+                        host = torch.empty_like(embeddings, device="cpu", pin_memory=True)
+                        host.copy_(embeddings, non_blocking=True)
+                        embeddings = host
+                    else:
+                        embeddings = embeddings.cpu()
 
-            all_embeddings.extend(embeddings)
+            if _ao_batched:
+                all_embeddings.append(embeddings)
+            else:
+                all_embeddings.extend(embeddings)
 
-        all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
+        if _ao_batched:
+            if _ao_opt_11 and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if all_embeddings:
+                stacked = torch.cat(all_embeddings, dim=0)
+                stacked = stacked[torch.from_numpy(np.argsort(length_sorted_idx))]
+                if convert_to_numpy or (precision and precision != "float32"):
+                    all_embeddings = (
+                        stacked.float().numpy()
+                        if stacked.dtype in (torch.bfloat16, torch.float16)
+                        else stacked.numpy()
+                    )
+                elif convert_to_tensor:
+                    all_embeddings = stacked
+                else:
+                    all_embeddings = list(stacked)
+            else:
+                all_embeddings = []
+        else:
+            all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 
-        if all_embeddings and precision and precision != "float32":
+        if len(all_embeddings) and precision and precision != "float32":
             all_embeddings = quantize_embeddings(all_embeddings, precision=precision)
 
         if convert_to_tensor:
             if len(all_embeddings):
                 if isinstance(all_embeddings, np.ndarray):
                     all_embeddings = torch.from_numpy(all_embeddings)
+                elif torch.is_tensor(all_embeddings):
+                    pass                      # already the stacked matrix
                 else:
                     all_embeddings = torch.stack(all_embeddings)
             else:

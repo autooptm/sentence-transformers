@@ -1,3 +1,68 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>sentence-transformers · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>3.03x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-3.03x-2ea44f"></a>
+    <a href="https://github.com/UKPLab/sentence-transformers/commit/846c3434bb8f19417359da5f2b5b53fc3da4bad1"><img alt="base" src="https://img.shields.io/badge/upstream-846c3434bb8f-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-NVIDIA%20RTX%204090-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [UKPLab/sentence-transformers](https://github.com/UKPLab/sentence-transformers) at commit
+> [`846c3434bb8f`](https://github.com/UKPLab/sentence-transformers/commit/846c3434bb8f19417359da5f2b5b53fc3da4bad1) with the AutoOptm patch applied on top.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is kept under [`.autooptm/`](.autooptm/).
+
+Every optimisation is on by default and the command runs unchanged — same file, same flags, same outputs. Every change is behind a switch that defaults on; see `.autooptm/autooptm.patch`.
+
+## The result — `python examples/sentence_transformer/applications/computing-embeddings/computing_embeddings.py`
+
+| | |
+|---|---|
+| **Command** | `python examples/sentence_transformer/applications/computing-embeddings/computing_embeddings.py` |
+| **Entry point** | `examples/sentence_transformer/applications/computing-embeddings/computing_embeddings.py` |
+| **Unit measured** | one encode() request (a list of texts → unit-norm embeddings), as the example script issues it |
+| **Before (stock)** | 38.93 (as reported) per unit |
+| **After (this tree, all switches default ON)** | 12.83 (as reported) per unit |
+| **Speedup** | **3.03x** end to end on NVIDIA RTX 4090, host noise floor 3.2% |
+| **Output** | default tree: cosine 0.99999 / rel_l2 5e-3 against the stock output; one switch gives a bit-exact-class path (rel_l2 7e-7) at 2.15x on the isolated step |
+
+### What changed
+
+| File | Where | Gain (alone) |
+|---|---|---|
+| `sentence_transformers/util/ao_opt.py` | new module (added by this fork) | 1.0x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode | 1.47x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode (batch loop) | 1.1x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode (output assembly) | 1.003x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode (D2H) | 1.057x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode (length sort) | 1.034x |
+| `sentence_transformers/sentence_transformer/model.py` | SentenceTransformer.encode (forward) | 1.089x |
+| `sentence_transformers/base/modules/transformer.py` | Transformer.preprocess | 1.024x |
+| `sentence_transformers/base/model.py` | BaseModel.preprocess | 1.024x |
+
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/sentence-transformers-ao.git
+cd sentence-transformers-ao
+# set up exactly as upstream documents, then:
+python examples/sentence_transformer/applications/computing-embeddings/computing_embeddings.py
+```
+
+`git diff 846c3434bb8f` is the same change as the patch file under `.autooptm/`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 <!--- BADGES: START --->
 
 [![HF Models](https://img.shields.io/badge/%F0%9F%A4%97-models-yellow)](https://huggingface.co/models?library=sentence-transformers)

@@ -35,6 +35,7 @@ from transformers.utils import logging as transformers_logging
 from sentence_transformers import __version__
 from sentence_transformers.base.evaluation import BaseEvaluator
 from sentence_transformers.base.modality import infer_batch_modality, is_message_dict, raise_unsupported_modality_error
+from sentence_transformers.util import ao_opt as _ao_opt_21
 from sentence_transformers.base.modality_types import Modality, PairInput, SingleInput
 from sentence_transformers.base.model_card import BaseModelCardData, generate_model_card
 from sentence_transformers.base.modules import Module, Router, Transformer
@@ -625,10 +626,14 @@ class BaseModel(nn.Sequential, PeftAdapterMixin, ABC):
         # If "message" is supported, any modality is allowed since the input module
         # can convert it to message format (e.g. wrapping images in chat messages).
         modality = None
-        try:
-            modality = infer_batch_modality(inputs, supported_modalities=self.modalities)
-        except (ValueError, TypeError):
-            pass
+        if _ao_opt_21.flag("ST_OPT_1") and type(inputs[0]) is str \
+                and all(type(x) is str for x in inputs):
+            modality = "text"
+        else:
+            try:
+                modality = infer_batch_modality(inputs, supported_modalities=self.modalities)
+            except (ValueError, TypeError):
+                pass
 
         if modality is not None and not self.supports(modality):
             raise_unsupported_modality_error(inputs, modality, self.modalities, f"{type(self).__name__} model")
